@@ -19,7 +19,7 @@ from math import erf as matherf
 from math import sqrt
 from numba import prange
 import time
-from TprParser.TprReader import TprReader
+
 
 @njit(cache=True, parallel=True)
 def get_EperResidue_numba( 
@@ -125,7 +125,7 @@ def get_EperResidue_numba(
 
 # Running with numba and residue optimization
 # Warning, this potentally only work is the residues and numbered from 1-n_res without any jump
-#@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True)
 def get_EperResidue_numba_res( 
                     positions, 
                     resids,
@@ -145,8 +145,7 @@ def get_EperResidue_numba_res(
                     exc_aij,
                     exc_bij,): # Notice that exc arrays have not been used because I realized that when computing energy with 
                                 # gromacs, those corrections are not added. The corresponding exceptions are just deleted 
-    LJ_mat = np.zeros((n_res, n_res))
-    Coul_mat = np.zeros((n_res, n_res))
+
     """Function to compute per-residue Lennard-Jones and Coulomb energies using 
     Numba for optimization. This function uses a neighbor list only 
     for residues, and then computes the energies for all atom pairs within those residues.
@@ -158,7 +157,7 @@ def get_EperResidue_numba_res(
     positions : np.ndarray(n_at, 3)
         Array of atom positions. Must be the positions of all atoms in the system
     resids : np.ndarray(n_at)
-        Array of residue indices for each atom.
+        Array of residue indices for each atom. (Should match with resindices? (To check))
     n_res : int
         Total number of residues.
     res_limits : np.ndarray(n_res)
@@ -207,8 +206,7 @@ def get_EperResidue_numba_res(
     inv_cutt6 = 1.0/cutoff_6
 
     n_pairs = neigh_res.shape[0]
-    out_i = np.zeros(n_pairs, dtype=np.int32)
-    out_j = np.zeros(n_pairs, dtype=np.int32)
+
     out_lj = np.zeros(n_pairs, dtype=np.float32)
     out_coul = np.zeros(n_pairs, dtype=np.float32)
 
@@ -437,45 +435,7 @@ class Simul():
         chains = set(chains)
         self.terminal_map = {"begin" : {}, "final" : {}} # Contain terminal information begin at end
         self.map_name2nblj = {} # Contain the mapp to LJ
-        
-        for item in chains:
-            
-            temp_terminal_map = {}
-            temmap_name2nblj = {}
-            chain_sel = self.universe.select_atoms(f"chainID {item}")
-            begin = chain_sel.resindices[0]
-            resname = chain_sel.residues.resnames[0]
-            t_begin = chain_sel.select_atoms(f"resindex {begin}")
-            temp_terminal_map["begin"] = {resname: {name: [int(nbindex), charg] for name, nbindex, charg in zip(t_begin.names, t_begin.nbindices, t_begin.charges)}}
-
-
-            final = chain_sel.resindices[-1]
-            resname = chain_sel.residues.resnames[-1]
-            t_final = chain_sel.select_atoms(f"resindex {final}")
-            temp_terminal_map["final"] = {resname: {name: [int(nbindex), charg] for name, nbindex, charg in zip(t_final.names, t_final.nbindices, t_final.charges)}}
-
-            # Problably doing more computations than needed
-            temmap_name2nblj = {res : {name:[int(nbindex), charg] for name,nbindex, charg in zip(chain_sel.select_atoms(f"resname {res} and not (resindex {begin} or resindex {final})").names,
-                                                                               chain_sel.select_atoms(f"resname {res} and not (resindex {begin} or resindex {final})").nbindices,
-                                                                               chain_sel.select_atoms(f"resname {res} and not (resindex {begin} or resindex {final})").charges
-                                                                               )} for res in chain_sel.residues.resnames}
-            
-
-            self.map_name2nblj.update(temmap_name2nblj)
-            self.terminal_map["begin"].update(temp_terminal_map["begin"])
-            self.terminal_map["final"].update(temp_terminal_map["final"])
-
-        keys = list(self.map_name2nblj.keys())
-        for key in keys:
-            if key == "HSD":
-                self.map_name2nblj["HIS"] = self.map_name2nblj["HSD"]
-
-        #print(self.terminal_map, self.map_name2nblj, "Terminal map and name to nbindex map")
-
-        # Good if no atomname can have a different nbindex, but not sure if this is always the case
-        #self.map_name2nblj = {name: nbindex for name, nbindex in zip(self.universe.atoms.names, self.nbindices)}
-
-
+    
 
 
 
@@ -529,135 +489,6 @@ class Simul():
 
         return exclusions_residues
     
-
-    def get_exclusions_from_mda(self, atomgroup, prev_indices = None, prev_orig_nat = None):
-
-        """Compute the exclusions for the nonbonded interactions using MDAnalysis.
-
-        Returns
-        -------
-        exclusions_residues : set
-            Set of tuples containing the residue indices of the excluded pairs.
-        """
-        #bonds = self.universe.atoms.bonds
-        universe = mda.Merge(atomgroup)
-        print(len(universe.atoms), universe.atoms.ids, universe.atoms.indices, "names")
-        universe.guess_TopologyAttrs(to_guess=["bonds", "angles", "dihedrals"])
-
-
-        indices = universe.atoms.indices
-        resindices = universe.atoms.resindices
-
-        #print("new indices", indices)
-        #print("resindices", resindices)
-        #print("original indices", prev_indices)
-        #print(universe.atoms.indices, prev_indices)
-
-        self.exc1 = set()
-        bonds = universe.atoms.bonds
-        #print(len(bonds), "bonds")
-        for bond in bonds:
-            at1 = int(bond[0].index)
-            at2 = int(bond[1].index)
-
-            if resindices[at1] != resindices[at2]:           
-                if prev_indices is not None:
-                    at1 = prev_indices[at1]
-                    at2 = prev_indices[at2] 
-                    self.exc1.add((min(at1, at2), max(at1, at2)))
-
-
-        dihe = universe.atoms.dihedrals
-        #print(len(dihe), "dihedrals")
-        for item in dihe:
-            at1 = int(item[0].index)
-            at2 = int(item[3].index)
-
-            if resindices[at1] != resindices[at2]:           
-                if prev_indices is not None:
-                    at1 = prev_indices[at1]
-                    at2 = prev_indices[at2] 
-                    self.exc1.add((min(at1, at2), max(at1, at2)))
-
-
-        
-        angles = universe.atoms.angles
-        #print(len(angles), "angles")
-        for item in angles:
-            at1 = int(item[0].index)
-            at2 = int(item[2].index)
-            if resindices[at1] != resindices[at2]:           
-                if prev_indices is not None:
-                    at1 = prev_indices[at1]
-                    at2 = prev_indices[at2] 
-                    self.exc1.add((min(at1, at2), max(at1, at2)))
-
-        exclusions = np.array(list(self.exc1))
-        #print("There are ", len(exclusions), "exclusions", exclusions)
-        #print([[int(resindices[atoms[0]]), int(resindices[atoms[1]])] for atoms in exclusions], "residues")
-        id_i = exclusions[:,0]
-        id_j = exclusions[:,1]
-
-        order = np.lexsort((id_j, id_i))
-
-        id_i = id_i[order]
-        id_j = id_j[order]
-
-        n_prev = min(prev_indices)
-
-        counts = np.bincount(id_i, minlength=prev_orig_nat)
-        begin = np.zeros(len(counts)+1, dtype=np.int32)
-        begin[1:] = np.cumsum(counts)
-    
-        print(begin, begin[n_prev+2],begin[n_prev], begin[n_prev+1], prev_indices, "begin")
-        print(counts, "counts")
-        print(id_i, "id_i")
-        print(id_j, "id_j")
-
-
-        return begin, id_i, id_j
-    
-    def repurpose_topology(self, pdb, xtc = None):
-        if xtc is not None:
-            self.new_u = mda.Universe(pdb, xtc) # Not TPR needed, since this is supposed writen with charmm names
-        else:
-            self.new_u = mda.Universe(pdb)
-        chains = set(self.new_u.atoms.chainIDs)
-        n = len(self.new_u.atoms)
-        
-        self.new_u.add_TopologyAttr("nbindices", [0 for i in range(n)])
-        self.new_u.add_TopologyAttr("charges", np.zeros(n))
-
-        for chain in chains:
-            chain_sel = self.new_u.select_atoms(f"chainID {chain}")
-            begin = chain_sel.resindices[0]
-            #resname = chain_sel.residues.resnames[0]
-            #t_begin = chain_sel.select_atoms(f"resindex {begin}")
-            #t_begin.charges = [self.terminal_map["begin"][resname][name][1] for name in t_begin.names]
-            #t_begin.nbindices = [self.terminal_map["begin"][resname][name][0] for name in t_begin.names]
-
-            final = chain_sel.resindices[-1]
-            #resname = chain_sel.residues.resnames[-1]
-            #t_final = chain_sel.select_atoms(f"resindex {final}")
-            #t_final.charges = [self.terminal_map["final"][resname][name][1] for name in t_final.names]
-            #t_final.nbindices = [self.terminal_map["final"][resname][name][0] for name in t_final.names]
-
-            aminoacids = set(chain_sel.residues.resnames)
-            for aminoacid in aminoacids:
-                if aminoacid not in self.map_name2nblj:
-                    continue
-                aa_sel = chain_sel.select_atoms(f"resname {aminoacid}")# and not (resindex {begin} or resindex {final})")
-                aa_sel.charges = [self.map_name2nblj[aminoacid][name][1]  if name in self.map_name2nblj[aminoacid] else 0  for name in aa_sel.names]
-                aa_sel.nbindices = [self.map_name2nblj[aminoacid][name][0] if name in self.map_name2nblj[aminoacid] else 0  for name in aa_sel.names]
-
-        return self.new_u
-        
-
-
-
-
-
-        
         
 
     
@@ -703,12 +534,11 @@ class Simul():
 
 
 
-        #print(sel_string, "sel_string")
-        #print(sel_indices, "resindices")
         
 
-        all_atoms = self.universe.select_atoms(sel_string)
-        resnames = list(set(all_atoms.residues.resnames))
+        all_atoms = self.universe.select_atoms("all")
+        subset = all_atoms.select_atoms(sel_string)
+        resnames = list(set(subset.residues.resnames))
         water_string = ""
         if "TIP3" in resnames:
             water_string = "or (resname TIP3 and name OH2)" 
@@ -716,7 +546,7 @@ class Simul():
         ca_atoms = all_atoms.select_atoms(f"(({sel_string}) and name CA) or ({ligand_selection[0]} and name {ligand_selection[1]}) {water_string}") # Only used for residue-optimized energy calculation
         ca_atoms_ids = ca_atoms.indices
 
-        #print(ca_atoms_ids, "ca_atoms_ids")
+
         Lj_data = []
         Coul_data = []
         for ts in self.universe.trajectory[start:stop:step]:
@@ -742,17 +572,6 @@ class Simul():
                 np.bincount(idx, weights=energies_per_res[:, 1], minlength=self.n_res) 
                 + np.bincount(idy, weights=energies_per_res[:, 1], minlength=self.n_res)
             )
-
-
-            
-            #if isinstance(selection, str):
-            #    lj = energies_per_res[0][sel_indices][:, sel_indices]
-            #    coul = energies_per_res[1][sel_indices][:, sel_indices]
-            #elif len(select_indices) == 2:
-            #    lj = energies_per_res[0][select_indices[0]][:, select_indices[1]]
-            #    coul = energies_per_res[1][select_indices[0]][:, select_indices[1]]
-            #else:
-            #    print("The code does not support interaction between three atom groups")
 
             Lj_data.append(res_lj_total) # Sum over all residues to get total energy for the frame
             Coul_data.append(res_coul_total) # Sum over all residues to get total energy for the frame
@@ -799,15 +618,11 @@ class Simul():
         
 
 
-        #print(sel_string, "sel_string")
-        #print(sel_indices, "resindices")
-
-        all_atoms = self.universe.select_atoms("protein") 
+        all_atoms = self.universe.select_atoms("all") 
         ca_atoms = all_atoms.select_atoms(sel_string) # Only used for residue-optimized energy calculation
         ca_atoms = all_atoms.select_atoms(f"({sel_string}) and name CA") # Only used for residue-optimized energy calculation
         ca_atoms_ids = ca_atoms.indices
 
-        #print(ca_atoms_ids, "ca_atoms_ids")
         frames = []
         idxs = []
         idys = []
