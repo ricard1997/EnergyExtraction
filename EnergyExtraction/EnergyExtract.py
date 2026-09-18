@@ -76,6 +76,11 @@ def get_EperResidue_numba(
     inv_cutt6 = 1.0/cutoff_6 
     LJ_mat = np.zeros((n_res, n_res))
     Coul_mat = np.zeros((n_res, n_res))
+    n_pairs = neigh_res.shape[0]
+    out_lj = np.zeros(n_pairs, dtype=np.float32)
+    out_coul = np.zeros(n_pairs, dtype=np.float32)
+
+
     for k in prange(neigh_res.shape[0]):
         i = neigh_res[k,0]
         j = neigh_res[k,1]
@@ -112,13 +117,9 @@ def get_EperResidue_numba(
                         Coul = -138.935456 * qprod * (inv_r) * matherf(beta * r)  # Coulomb correction for PME (May remove eventually) 
                         break
 
+                out_lj[k] = ((inv_r6 * aij)**2 - inv_r6 * bij) - ((aij*inv_cutt6)**2 - (bij*inv_cutt6))  # Lennard-Jones potential with cutoff
+                out_coul[k] = Coul
 
-                LJ_val = ((inv_r6 * aij)**2 - inv_r6 * bij) - ((aij*inv_cutt6)**2 - (bij*inv_cutt6))  # Lennard-Jones potential with cutoff
-                LJ_mat[resids[i]-1, resids[j]-1] += LJ_val
-                LJ_mat[resids[j]-1, resids[i]-1] += LJ_val
-
-                Coul_mat[resids[i]-1, resids[j]-1] += Coul
-                Coul_mat[resids[j]-1, resids[i]-1] += Coul
     return LJ_mat, Coul_mat
 
 
@@ -162,7 +163,7 @@ def get_EperResidue_numba_res(
         Total number of residues.
     res_limits : np.ndarray(n_res)
         Array of indices that mark the end of each residue in the positions array.
-    nbindices : np.ndarray
+    nbindices : np.ndarray(n_at)
         Array of nonbonded indices for each atom.
     Acoef : np.ndarray
         Array of A coefficients for Lennard-Jones potential.
@@ -244,24 +245,24 @@ def get_EperResidue_numba_res(
                         Coul = 138.935456 * qprod * (inv_r) * matherfc(beta * r)#-1/cutoff)  # Coulomb's constant in kJ·nm/(mol·e²)
 
                         # Only add bonded exceptions if the residues are adjacent
-                        if resids[l] == resids[m] + 1  or resids[l] == resids[m]-1:
-                            if l > m:
-                                ii = m
-                                jj = l
-                            else:  
-                                ii = l
-                                jj = m
-                            # Lookup in the encoded list
-                            start_idx = exc_begin[ii]
-                            final_idx = exc_begin[ii+1]
-                            # Lookup in the elements of the encoded list
-                            for s in range(start_idx,final_idx):
-                                if exc_j[s] == jj and exc_i[s] == ii:
-                                    aij = 0#exc_aij[s] # Gromacs excludes all the interactions 1-2, 1-3, 1-4
-                                    bij = 0#exc_bij[s] # Gromacs excludes all the interactions 1-2, 1-3, 1-4 for LJ potentials
-                                    #Coul = 138.935456 * qprod * (inv_r) * matherfc(beta * r)
-                                    Coul = -138.935456 * qprod * (inv_r) * matherf(beta * r)  # Coulomb correction for PME (May remove eventually) 
-                                    break
+
+                        if l > m:
+                            ii = m
+                            jj = l
+                        else:  
+                            ii = l
+                            jj = m
+                        # Lookup in the encoded list
+                        start_idx = exc_begin[ii]
+                        final_idx = exc_begin[ii+1]
+                        # Lookup in the elements of the encoded list
+                        for s in range(start_idx,final_idx):
+                            if exc_j[s] == jj and exc_i[s] == ii:
+                                aij = 0#exc_aij[s] # Gromacs excludes all the interactions 1-2, 1-3, 1-4
+                                bij = 0#exc_bij[s] # Gromacs excludes all the interactions 1-2, 1-3, 1-4 for LJ potentials
+                                #Coul = 138.935456 * qprod * (inv_r) * matherfc(beta * r)
+                                Coul = -138.935456 * qprod * (inv_r) * matherf(beta * r)  # Coulomb correction for PME (May remove eventually) 
+                                break
                         
                         
 
@@ -431,10 +432,6 @@ class Simul():
         for attr in attributes:
             self.universe.add_TopologyAttr(attr, attributes[attr])
 
-        chains = self.universe.atoms.chainIDs
-        chains = set(chains)
-        self.terminal_map = {"begin" : {}, "final" : {}} # Contain terminal information begin at end
-        self.map_name2nblj = {} # Contain the mapp to LJ
     
 
 
@@ -467,7 +464,7 @@ class Simul():
             epsilons[k] = epsilon.value_in_unit(unit.kilojoule_per_mole)
             qprod[k] = chargeprod.value_in_unit(unit.elementary_charge**2)
 
-        
+        # Lookup arrays are created but not used because of Gromacs missmatch
         self.exc = np.array(exc)
         order = np.lexsort((id_j, id_i))
 
@@ -492,7 +489,10 @@ class Simul():
         
 
     
-    def get_Energy_perres(self, start = 0, stop = -1, step = 1, selection = "protein", ligand_selection = None):
+    def get_Energy_perres(self, start = 0, stop = -1,
+                           step = 1,
+                            selection = "protein", 
+                            ligand_selection = None):
         """Compute the energy of the system from the trajectory
 
         Parameters
@@ -503,8 +503,15 @@ class Simul():
             Stop frame, by default -1 (last frame)
         step : int, optional
             Step size, by default 1
-        selection: str, optional
-            Atom selection string for MDAnalysis, by default "protein"
+        selection: str or list of two elements, optional
+            Atom selection string in MDAnalysis style, by default "protein"
+            Exmples: "protein and chainID A" (This will compute the per residue energy of the selection)
+                    ["chainID A", "chainID B"] (This will compute the per residue energy of the interaction chain A, chain B)
+        ligand_selection: list, optional
+            List containing the selection string for the ligand and the 
+            atom name to be used for the energy calculation, by default None
+            Example: ligand_selection = ["resname LIG", "C1"] (This will inlcude the ligand in the per residue energy
+             calculation)
 
         Returns
         -------
@@ -514,7 +521,6 @@ class Simul():
             Array of Coulomb energies for each frame
         """
         
-        print("started_perres")
 
         sel_string = selection if isinstance(selection, str) else " or ".join([f"({sel})" for sel in selection])
         if ligand_selection is not None:
@@ -535,14 +541,23 @@ class Simul():
 
 
         
-
+        # All atoms should be accounted, if not there may be problems with the energy 
+        # calculation because the resindices/ indices wont match
         all_atoms = self.universe.select_atoms("all")
+
+        # Selection of atoms we will work wiht including ligand
         subset = all_atoms.select_atoms(sel_string)
         resnames = list(set(subset.residues.resnames))
         water_string = ""
+
+        # Add waters to the calculation if present in selection
+        # This is needed because initial selectio of CA does not account for water representative. Notice that ligand represetative is in 
+        # ligand_selection and ions should be included in case needed
         if "TIP3" in resnames:
             water_string = "or (resname TIP3 and name OH2)" 
         #ca_atoms = all_atoms.select_atoms(sel_string) # Only used for residue-optimized energy calculation
+        
+        # Select one representative atom for each residue (Needed to compute neighbor list optimization)
         ca_atoms = all_atoms.select_atoms(f"(({sel_string}) and name CA) or ({ligand_selection[0]} and name {ligand_selection[1]}) {water_string}") # Only used for residue-optimized energy calculation
         ca_atoms_ids = ca_atoms.indices
 
@@ -581,6 +596,86 @@ class Simul():
         result_coul = np.asarray(Coul_data, dtype = np.float32)
         
         return result_lj, result_coul
+
+
+
+
+    def get_Energy_perres_atombased(self, start = 0, stop = -1,
+                           step = 1,
+                            selection = "protein", 
+                            ):
+        """Compute the energy of the system from the trajectory
+
+        Parameters
+        ----------
+        start : int, optional
+            Start frame, by default 0
+        stop : int, optional
+            Stop frame, by default -1 (last frame)
+        step : int, optional
+            Step size, by default 1
+        selection: str or list of two elements, optional
+            Atom selection string in MDAnalysis style, by default "protein"
+            Exmples: "protein and chainID A" (This will compute the per residue energy of the selection)
+                    ["chainID A", "chainID B"] (This will compute the per residue energy of the interaction chain A, chain B)
+
+
+        Returns
+        -------
+        result_lj : np.ndarray
+            Array of Lennard-Jones energies for each frame
+        result_coul : np.ndarray
+            Array of Coulomb energies for each frame
+        """
+        
+
+        sel_string = selection if isinstance(selection, str) else " or ".join([f"({sel})" for sel in selection])
+
+
+        
+
+
+
+        
+        # In atom based we can account only for the atoms in sel_string but we have to make sure that 
+        # Those atoms are consiguous in the order of the original pdb file. 
+        # To be more specifically, the atoms 
+        all_atoms = self.universe.select_atoms(sel_string)
+
+        Lj_data = []
+        Coul_data = []
+        for ts in self.universe.trajectory[start:stop:step]:
+            if self.verbose:
+                print(f"Frame {ts.frame}")
+
+            # Get positions of all atoms in the system
+            positions = all_atoms.positions/10 # Convert from Angstroms (MDAnalysis default units) to nanometers
+
+            t1 = time.perf_counter()
+
+            # Currently, it will compute for all the atoms/resids in the selection, later we can modify it to only incluse some by using selection
+            idx, idy, energies_per_res = self.call_Energy_atombased(positions=positions)
+            t2 = time.perf_counter()
+            print(f"Frame {ts.frame}: Energy calculation took {t2-t1:.4f} seconds####")
+            res_lj_total = (
+                np.bincount(idx, weights=energies_per_res[:, 0], minlength=self.n_res) 
+                + np.bincount(idy, weights=energies_per_res[:, 0], minlength=self.n_res)
+            )
+
+            res_coul_total = (
+                np.bincount(idx, weights=energies_per_res[:, 1], minlength=self.n_res) 
+                + np.bincount(idy, weights=energies_per_res[:, 1], minlength=self.n_res)
+            )
+
+            Lj_data.append(res_lj_total) # Sum over all residues to get total energy for the frame
+            Coul_data.append(res_coul_total) # Sum over all residues to get total energy for the frame
+
+        result_lj = np.asarray(Lj_data, dtype = np.float32)
+        
+        result_coul = np.asarray(Coul_data, dtype = np.float32)
+        
+        return result_lj, result_coul
+    
     
 
     def get_Energy_pairwise(self, start = 0, stop = -1, step = 1, selection = "protein"):
@@ -672,19 +767,19 @@ class Simul():
                         positions, 
                         self.resids,
                         self.n_res, 
-                    self.nbindices, 
-                    self.Acoef, 
-                    self.Bcoef, 
-                    self.charges,
-                    neigh_res,
-                    self.cutoff,
-                    self.beta,                    
-                    self.exc_begin,
-                    self.exc_i,
-                    self.exc_j,
-                    self.exc_qprod,
-                    self.exc_aij,
-                    self.exc_bij)
+                        self.nbindices, 
+                        self.Acoef, 
+                        self.Bcoef, 
+                        self.charges,
+                        neigh_res,
+                        self.cutoff,
+                        self.beta,                    
+                        self.exc_begin,
+                        self.exc_i,
+                        self.exc_j,
+                        self.exc_qprod,
+                        self.exc_aij,
+                        self.exc_bij)
         
         return energies
 
