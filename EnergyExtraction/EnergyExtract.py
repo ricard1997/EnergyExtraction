@@ -25,7 +25,7 @@ import time
 def get_EperResidue_numba( 
                     positions, 
                     resids,
-                    n_res, 
+                    indices, 
                     nbindices, 
                     Acoef, 
                     Bcoef, 
@@ -49,6 +49,8 @@ def get_EperResidue_numba(
         Array of atom positions. Must be the positions of all atoms in the system
     resids : np.ndarray(n_at)
         Array of residue indices for each atom.
+    indices : np.ndarray(n_at)
+        Array of atom indices. This allows for flexibility in selecting a subset of atoms for energy calculations.
     n_res :  int
         Total number of residues.
     nbindices : np.ndarray
@@ -74,8 +76,7 @@ def get_EperResidue_numba(
     cutoff_2 = cutoff*cutoff
     cutoff_6 = cutoff_2*cutoff_2*cutoff_2
     inv_cutt6 = 1.0/cutoff_6 
-    LJ_mat = np.zeros((n_res, n_res))
-    Coul_mat = np.zeros((n_res, n_res))
+
     n_pairs = neigh_res.shape[0]
     out_lj = np.zeros(n_pairs, dtype=np.float32)
     out_coul = np.zeros(n_pairs, dtype=np.float32)
@@ -84,6 +85,8 @@ def get_EperResidue_numba(
     for k in prange(neigh_res.shape[0]):
         i = neigh_res[k,0]
         j = neigh_res[k,1]
+        mapped_i = indices[i]
+        mapped_j = indices[j]
         if resids[i] != resids[j]:
             dx = positions[i,0] - positions[j,0]
             dy = positions[i,1] - positions[j,1]
@@ -92,18 +95,20 @@ def get_EperResidue_numba(
             if r2 < cutoff_2: #May delete
                 r = sqrt(r2)
                 inv_r = 1.0/r
-                inv_r6 = inv_r**6
-                aij = Acoef[nbindices[i], nbindices[j]]
-                bij = Bcoef[nbindices[i], nbindices[j]]
-                qprod = charges[i] * charges[j]
+                inv_r2 = inv_r*inv_r
+                inv_r6 = inv_r2*inv_r2*inv_r2
+
+                aij = Acoef[nbindices[mapped_i], nbindices[mapped_j]]
+                bij = Bcoef[nbindices[mapped_i], nbindices[mapped_j]]
+                qprod = charges[mapped_i] * charges[mapped_j]
 
                 Coul = 138.935456 * qprod * (inv_r) * matherfc(beta * r) #-1/cutoff)  # Coulomb's constant in kJ·nm/(mol·e²)
-                if i > j:
-                    ii = j
-                    jj = i
+                if mapped_i > mapped_j:
+                    ii = mapped_j
+                    jj = mapped_i
                 else:  
-                    ii = i
-                    jj = j
+                    ii = mapped_i
+                    jj = mapped_j
                 # Lookup in the encoded list
                 start_idx = exc_begin[ii]
                 final_idx = exc_begin[ii+1]
@@ -120,7 +125,7 @@ def get_EperResidue_numba(
                 out_lj[k] = ((inv_r6 * aij)**2 - inv_r6 * bij) - ((aij*inv_cutt6)**2 - (bij*inv_cutt6))  # Lennard-Jones potential with cutoff
                 out_coul[k] = Coul
 
-    return LJ_mat, Coul_mat
+    return out_lj, out_coul
 
 
 
@@ -632,7 +637,7 @@ class Simul():
         sel_string = selection if isinstance(selection, str) else " or ".join([f"({sel})" for sel in selection])
 
 
-        
+        self.sel_string = sel_string
 
 
 
@@ -649,12 +654,12 @@ class Simul():
                 print(f"Frame {ts.frame}")
 
             # Get positions of all atoms in the system
-            positions = all_atoms.positions/10 # Convert from Angstroms (MDAnalysis default units) to nanometers
+            #positions = all_atoms.positions/10 # Convert from Angstroms (MDAnalysis default units) to nanometers
 
             t1 = time.perf_counter()
 
             # Currently, it will compute for all the atoms/resids in the selection, later we can modify it to only incluse some by using selection
-            idx, idy, energies_per_res = self.call_Energy_atombased(positions=positions)
+            idx, idy, energies_per_res = self.call_Energy_atombased(all_atoms)
             t2 = time.perf_counter()
             print(f"Frame {ts.frame}: Energy calculation took {t2-t1:.4f} seconds####")
             res_lj_total = (
@@ -755,18 +760,26 @@ class Simul():
         return frames, idxs, idys, Lj_data, Coul_data
     
 
-    def call_Energy_atombased(self,positions):
+    def call_Energy_atombased(self,atoms):
+
+        
 
         neigh_res = FastNS(self.cutoff, positions, box = self.universe.dimensions)
+
+
+        positions = atoms.positions/10 # Convert from Angstroms (MDAnalysis default units) to nanometers
+        resids = atoms.resindices
+        indices = atoms.indices
+
 
         # Get neighboring residue pairs
         neigh_res = neigh_res.self_search()
         neigh_res = neigh_res.get_pairs()
+        output_data = np.zeros((neigh_res.shape[0], 2), dtype=np.float32) # Store value for each residue pair, 0: res1, 1: res2, 2: LJ, 3: Coulomb
 
-        energies = get_EperResidue_numba( 
-                        positions, 
-                        self.resids,
-                        self.n_res, 
+        output_data[:,0], output_data[:,1] = get_EperResidue_numba(positions,
+                        resids,
+                        indices, 
                         self.nbindices, 
                         self.Acoef, 
                         self.Bcoef, 
@@ -781,7 +794,7 @@ class Simul():
                         self.exc_aij,
                         self.exc_bij)
         
-        return energies
+        return neigh_res[:,0], neigh_res[:,1], output_data
 
 
     
