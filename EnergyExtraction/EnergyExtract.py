@@ -81,12 +81,16 @@ def get_EperResidue_numba(
     out_lj = np.zeros(n_pairs, dtype=np.float32)
     out_coul = np.zeros(n_pairs, dtype=np.float32)
 
+    r_i = np.zeros(n_pairs, dtype=np.float32)
+    r_j = np.zeros(n_pairs, dtype=np.float32)
 
     for k in prange(neigh_res.shape[0]):
         i = neigh_res[k,0]
         j = neigh_res[k,1]
         mapped_i = indices[i]
         mapped_j = indices[j]
+        r_i[k] = resids[i]
+        r_j[k] = resids[j]
         if resids[i] != resids[j]:
             dx = positions[i,0] - positions[j,0]
             dy = positions[i,1] - positions[j,1]
@@ -125,7 +129,7 @@ def get_EperResidue_numba(
                 out_lj[k] = ((inv_r6 * aij)**2 - inv_r6 * bij) - ((aij*inv_cutt6)**2 - (bij*inv_cutt6))  # Lennard-Jones potential with cutoff
                 out_coul[k] = Coul
 
-    return out_lj, out_coul
+    return r_i, r_j, out_lj, out_coul
 
 
 
@@ -536,7 +540,7 @@ class Simul():
         sel_indices = self.universe.select_atoms(sel_string).residues.resindices
         
 
-        select_indices = False
+        select_indices = sel_indices
         if isinstance(selection, list):
             select_indices = [] 
             for select in selection:
@@ -596,11 +600,20 @@ class Simul():
             Lj_data.append(res_lj_total) # Sum over all residues to get total energy for the frame
             Coul_data.append(res_coul_total) # Sum over all residues to get total energy for the frame
 
-        result_lj = np.asarray(Lj_data, dtype = np.float32)
         
+        
+        result_lj = np.asarray(Lj_data, dtype = np.float32)
         result_coul = np.asarray(Coul_data, dtype = np.float32)
         
-        return result_lj, result_coul
+        resindices = list(range(result_lj.shape[1]))
+        residues = self.universe.residues[resindices]
+        
+        header = [f"{resid}{resname}" for resid, resname in zip (residues.resids, residues.resnames)]
+
+
+        df_lj = pd.DataFrame(result_lj, columns = header)
+        df_coul = pd.DataFrame(result_coul, columns = header)
+        return df_lj, df_coul
 
 
 
@@ -660,6 +673,13 @@ class Simul():
 
             # Currently, it will compute for all the atoms/resids in the selection, later we can modify it to only incluse some by using selection
             idx, idy, energies_per_res = self.call_Energy_atombased(all_atoms)
+            idx = idx.astype(np.int64)
+            idy = idy.astype(np.int64)
+
+            print("idx:", idx.shape, idx.dtype)
+            print("idy:", idy.shape, idy.dtype)
+            print("energies:", energies_per_res.shape, energies_per_res.dtype)
+            print("n_res:", self.n_res)
             t2 = time.perf_counter()
             print(f"Frame {ts.frame}: Energy calculation took {t2-t1:.4f} seconds####")
             res_lj_total = (
@@ -671,7 +691,6 @@ class Simul():
                 np.bincount(idx, weights=energies_per_res[:, 1], minlength=self.n_res) 
                 + np.bincount(idy, weights=energies_per_res[:, 1], minlength=self.n_res)
             )
-
             Lj_data.append(res_lj_total) # Sum over all residues to get total energy for the frame
             Coul_data.append(res_coul_total) # Sum over all residues to get total energy for the frame
 
@@ -763,11 +782,11 @@ class Simul():
     def call_Energy_atombased(self,atoms):
 
         
+        positions = atoms.positions/10 # Convert from Angstroms (MDAnalysis default units) to nanometers
 
         neigh_res = FastNS(self.cutoff, positions, box = self.universe.dimensions)
 
 
-        positions = atoms.positions/10 # Convert from Angstroms (MDAnalysis default units) to nanometers
         resids = atoms.resindices
         indices = atoms.indices
 
@@ -776,8 +795,9 @@ class Simul():
         neigh_res = neigh_res.self_search()
         neigh_res = neigh_res.get_pairs()
         output_data = np.zeros((neigh_res.shape[0], 2), dtype=np.float32) # Store value for each residue pair, 0: res1, 1: res2, 2: LJ, 3: Coulomb
-
-        output_data[:,0], output_data[:,1] = get_EperResidue_numba(positions,
+        r_i = np.zeros(neigh_res.shape[0], dtype=int)
+        r_j = np.zeros(neigh_res.shape[0], dtype =int)
+        r_i, r_j,output_data[:,0], output_data[:,1] = get_EperResidue_numba(positions,
                         resids,
                         indices, 
                         self.nbindices, 
@@ -794,7 +814,7 @@ class Simul():
                         self.exc_aij,
                         self.exc_bij)
         
-        return neigh_res[:,0], neigh_res[:,1], output_data
+        return r_i, r_j, output_data
 
 
     
@@ -810,7 +830,8 @@ class Simul():
         selections : bool, optional
             If True receive a list of 2, whith the resindices of the groups (0based index), by default False
         selected_residues : list, optional
-            List containing all the residues selected (merged groups, 0 based index), by default None # I may be able to ask only one of those
+            List containing all the residues selected (merged groups, 0 based index, i.e resindices), by default None # I may be able to ask only one of those. If always passed makes the 
+            Able to hanlde any selection
 
         Returns
         -------
