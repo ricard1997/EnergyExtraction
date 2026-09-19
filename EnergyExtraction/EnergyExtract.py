@@ -540,7 +540,7 @@ class Simul():
         sel_indices = self.universe.select_atoms(sel_string).residues.resindices
         
 
-        select_indices = sel_indices
+        select_indices = False
         if isinstance(selection, list):
             select_indices = [] 
             for select in selection:
@@ -562,8 +562,11 @@ class Simul():
         # Add waters to the calculation if present in selection
         # This is needed because initial selectio of CA does not account for water representative. Notice that ligand represetative is in 
         # ligand_selection and ions should be included in case needed
+        water_start = self.n_res
         if "TIP3" in resnames:
-            water_string = "or (resname TIP3 and name OH2)" 
+            water_string = "or (resname TIP3 and name OH2)"
+            waters_start = self.universe.select_atoms(water_string).residues.resindices[0]
+            
         #ca_atoms = all_atoms.select_atoms(sel_string) # Only used for residue-optimized energy calculation
         
         # Select one representative atom for each residue (Needed to compute neighbor list optimization)
@@ -587,14 +590,17 @@ class Simul():
                                                          selected_residues = sel_indices)
             t2 = time.perf_counter()
             print(f"Frame {ts.frame}: Energy calculation took {t2-t1:.4f} seconds####")
+
+            mask_idx = idx < water_start
+            mask_idy = idy < water_start
             res_lj_total = (
-                np.bincount(idx, weights=energies_per_res[:, 0], minlength=self.n_res) 
-                + np.bincount(idy, weights=energies_per_res[:, 0], minlength=self.n_res)
+                np.bincount(idx[mask_idx], weights=energies_per_res[mask_idx, 0], minlength=self.n_res) 
+                + np.bincount(idy[mask_idy], weights=energies_per_res[mask_idy, 0], minlength=self.n_res)
             )
 
             res_coul_total = (
-                np.bincount(idx, weights=energies_per_res[:, 1], minlength=self.n_res) 
-                + np.bincount(idy, weights=energies_per_res[:, 1], minlength=self.n_res)
+                np.bincount(idx[mask_idx], weights=energies_per_res[mask_idx, 1], minlength=self.n_res) 
+                + np.bincount(idy[mask_idy], weights=energies_per_res[mask_idy, 1], minlength=self.n_res)
             )
 
             Lj_data.append(res_lj_total) # Sum over all residues to get total energy for the frame
